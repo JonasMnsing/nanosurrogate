@@ -29,7 +29,7 @@ from nanosurrogate.data import load_and_prepare_data
 from nanosurrogate.models import build_mlp
 
 # ─── Configuration ────────────────────────────────────────────────────────────
-FILEPATH           = "data/Nx=9_Ny=9_Ne=8.csv"
+FILEPATH           = "data/Nx=3_Ny=3_Ne=8_self_cap0.00.csv"
 OUTPUT_DIR         = Path("models/hurdle_baseline")
 
 # Physical & Transformation Parameters
@@ -44,8 +44,8 @@ USE_ERROR_WEIGHTS  = True   # Toggle KMC inverse-error weighting for the regress
 WEIGHT_CLIP_RANGE  = (0.1, 10.0)  # Prevents extreme single-sample weights from exploding gradients
 
 # Network Architectures: List of [nodes, l2_regularization, dropout_rate]
-CLASSIFIER_LAYERS  = [[128, 1e-4, 0.1]] * 4  # 4 layers are sufficient for blockade hyperplane boundaries
-REGRESSOR_LAYERS   = [[256, 1e-4, 0.0]] * 8  # 8 deep layers to capture non-linear tunneling landscape
+CLASSIFIER_LAYERS  = [[64, 1e-4, 0.1]] * 2  # 4 layers are sufficient for blockade hyperplane boundaries
+REGRESSOR_LAYERS   = [[64, 1e-4, 0.0]] * 2  # 8 deep layers to capture non-linear tunneling landscape
 # ──────────────────────────────────────────────────────────────────────────────
 
 
@@ -85,33 +85,52 @@ def main():
     X_test  = x_scaler.transform(data["X"][idx_test])
 
     # =========================================================================
-    # 2. STEP 1: Train Coulomb Blockade Classifier (All Data)
+    # 2. STEP 1: Train Coulomb Blockade Classifier (Or Bypass it)
     # =========================================================================
     print("\n--- 1. Training Coulomb Blockade Classifier ---")
     y_c_train = data["y_class"][idx_train]
     y_c_val   = data["y_class"][idx_val]
     
-    # Compute balanced class weights in case blocked states are rare in the dataset
-    classes = np.unique(y_c_train.flatten())
-    c_weights = compute_class_weight(class_weight="balanced", classes=classes, y=y_c_train.flatten())
-    class_weight_dict = dict(zip(classes.astype(int), c_weights))
-    print(f"Classifier class weights (0=Blocked, 1=Conducting): {class_weight_dict}")
+    # ─── NEU: Bypass für extrem kleine Blockade-Anteile ───
+    MIN_BLOCKED_SAMPLES = 100
+    n_blocked_train = np.sum(y_c_train == 0.0)
     
-    # Use ceil to accurately include the final partial batch in each epoch
-    steps_c = int(np.ceil(len(X_train) / BATCH_SIZE))
-    lr_c = CosineDecay(initial_learning_rate=LR, decay_steps=steps_c * EPOCHS, alpha=0.1)
-    
-    clf = build_mlp(X_train.shape[1], CLASSIFIER_LAYERS, lr_c, is_classifier=True)
-    history_clf = clf.fit(
-        X_train, y_c_train,
-        validation_data=(X_val, y_c_val),
-        class_weight=class_weight_dict,
-        batch_size=BATCH_SIZE, 
-        epochs=EPOCHS,
-        callbacks=[EarlyStopping(monitor='val_loss', patience=40, restore_best_weights=True)],
-        verbose=2
-    )
-    clf.save(OUTPUT_DIR / "classifier_model.keras")
+    if n_blocked_train < MIN_BLOCKED_SAMPLES:
+        print(f"Only {n_blocked_train} blocked samples in training set.")
+        print("Skipping Classifier training. System is almost purely conducting.")
+        print("Building a Dummy-Classifier that always predicts 1.0 (Conducting).")
+        
+        # "Dummy-Classifier"
+        clf = build_mlp(X_train.shape[1], [[2, 0.0, 0.0]], lr_schedule=LR, is_classifier=True)
+        # Overwrite weight of the last layer (Sigmoid(100) = 1.0)
+        final_layer = clf.layers[-1]
+        dummy_weights = [np.zeros_like(final_layer.get_weights()[0]), np.array([100.0])]
+        final_layer.set_weights(dummy_weights)
+        
+        clf.save(OUTPUT_DIR / "classifier_model.keras")
+        history_clf = type('DummyHistory', (), {'history': {'bypass': [True]}})()
+        
+    else:
+        # ─── Normales Classifier Training (Dein bisheriger Code) ───
+        classes = np.unique(y_c_train.flatten())
+        c_weights = compute_class_weight(class_weight="balanced", classes=classes, y=y_c_train.flatten())
+        class_weight_dict = dict(zip(classes.astype(int), c_weights))
+        print(f"Classifier class weights (0=Blocked, 1=Conducting): {class_weight_dict}")
+        
+        steps_c = int(np.ceil(len(X_train) / BATCH_SIZE))
+        lr_c = CosineDecay(initial_learning_rate=LR, decay_steps=steps_c * EPOCHS, alpha=0.1)
+        
+        clf = build_mlp(X_train.shape[1], CLASSIFIER_LAYERS, lr_c, is_classifier=True)
+        history_clf = clf.fit(
+            X_train, y_c_train,
+            validation_data=(X_val, y_c_val),
+            class_weight=class_weight_dict,
+            batch_size=BATCH_SIZE, 
+            epochs=EPOCHS,
+            callbacks=[EarlyStopping(monitor='val_loss', patience=40, restore_best_weights=True)],
+            verbose=2
+        )
+        clf.save(OUTPUT_DIR / "classifier_model.keras")
 
     # =========================================================================
     # 3. STEP 2: Train Current Regressor (ONLY Conducting Data)
