@@ -76,7 +76,7 @@ def load_and_prepare_data(filepath: str, scale_factor: float = 0.16, threshold: 
         "weights": weights.flatten()
     }
 
-def add_physics_features(X_raw: np.ndarray, diff_pairs: Optional[List[Tuple[int, int]]] = None, prod_pairs: Optional[List[Tuple[int, int]]] = None) -> np.ndarray:
+def add_physics_features(X: np.ndarray, diff_pairs: Optional[List[Tuple[int, int]]] = None, sum_pairs: Optional[List[Tuple[int, int]]] = None, prod_pairs: Optional[List[Tuple[int, int]]] = None) -> np.ndarray:
     """
     Dynamically appends physical interaction features to the raw voltage vector.
     
@@ -94,16 +94,18 @@ def add_physics_features(X_raw: np.ndarray, diff_pairs: Optional[List[Tuple[int,
     np.ndarray
         Expanded feature matrix.
     """
-    features = [X_raw]
-    
+    features = [X]
+
     if diff_pairs:
-        for (i, j) in diff_pairs:
-            diff = (X_raw[:, i] - X_raw[:, j]).reshape(-1, 1)
-            features.append(diff)
-            
+        for i, j in diff_pairs:
+            features.append((X[:, i] - X[:, j]).reshape(-1, 1))
+
+    if sum_pairs:
+        for i, j in sum_pairs:
+            features.append((X[:, i] + X[:, j]).reshape(-1, 1))
+
     if prod_pairs:
-        for (i, j) in prod_pairs:
-            prod = (X_raw[:, i] * X_raw[:, j]).reshape(-1, 1)
-            features.append(prod)
-            
-    return np.hstack(features).astype(np.float32)
+        for i, j in prod_pairs:
+            features.append((X[:, i] * X[:, j]).reshape(-1, 1))
+
+    return np.hstack(features)

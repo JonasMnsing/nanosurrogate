@@ -138,21 +138,24 @@ class HurdleSurrogate:
         """
         # 1. Scale input voltages to [-1, 1]
         X_scaled = self.x_scaler.transform(X_raw)
-        
+
         # 2. Stage 1: Predict Conduction Probability P in [0, 1]
-        prob_conducting = self.classifier.predict(X_scaled, batch_size=batch_size, verbose=0)
-        
+        prob_cond = self.classifier.predict(X_scaled, verbose=0, batch_size=batch_size)
+
         # 3. Stage 2: Predict Current & Invert Transformations
         #    a) Neural net predicts in [-1, 1]
-        y_scaled_pred = self.regressor.predict(X_scaled, batch_size=batch_size, verbose=0)
+        y_scaled  = self.regressor.predict(X_scaled, verbose=0, batch_size=batch_size)
         #    b) Invert MinMaxScaler back to arcsinh space
-        y_trans_pred = self.y_scaler.inverse_transform(y_scaled_pred)
+        y_trans = self.y_scaler.inverse_transform(y_scaled)
         #    c) Invert arcsinh via sinh: I = sinh(y_trans) * scale_factor
-        current_pred = np.sinh(y_trans_pred) * self.scale_factor
-        
+        I_pred  = np.sinh(y_trans) * self.scale_factor
+
         # 4. Combine Classifier & Regressor
         if soft_gating:
-            return prob_conducting * current_pred
+            p_low  = max(0.05, prob_threshold - 0.15)
+            p_high = min(0.95, prob_threshold + 0.25)
+            gate   = np.clip((prob_cond - p_low) / (p_high - p_low), 0.0, 1.0)
+            return gate * I_pred
         else:
-            is_conducting = (prob_conducting >= prob_threshold).astype(np.float32)
-            return is_conducting * current_pred
+            is_conducting = (prob_cond >= prob_threshold).astype(np.float32)
+            return is_conducting * I_pred
