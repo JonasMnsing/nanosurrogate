@@ -36,12 +36,12 @@ from nanosurrogate.data import add_physics_features, load_and_prepare_data
 from nanosurrogate.models import build_mlp
 
 # ─── Configuration ────────────────────────────────────────────────────────────
-FILEPATH            = "data/Nx=3_Ny=3_Ne=8_self_cap0.00.csv"
+FILEPATH            = "data/phase_space_sample/Nx=3_Ny=3_Ne=8_self_cap0.00.csv"
 OUTPUT_DIR          = Path("models/hurdle_baseline")
 RANDOM_SEED         = 42
 
 # Physical & Transformation Parameters
-SCALE_FACTOR        = 2e5   # Transition scale [aA] between linear and log regime in arcsinh
+SCALE_FACTOR        = 1e6   # Transition scale [aA] between linear and log regime in arcsinh
 BLOCKADE_THRESHOLD  = 0.16  # Current cutoff [aA] (~1 e/s) defining the Coulomb blockade regime
 
 # Training Hyperparameters
@@ -53,7 +53,7 @@ WEIGHT_CLIP_RANGE   = (0.5, 2.0) # Prevents extreme single-sample weights from d
 
 # Network Architectures: List of [nodes, l2_regularization, dropout_rate]
 CLASSIFIER_LAYERS   = [[128, 1e-5, 0.05]] * 4  # 4 layers for smooth blockade hyperplane boundaries
-REGRESSOR_LAYERS    = [[256, 1e-5, 0.0]] * 6   # 6 deep layers to capture non-linear tunneling currents
+REGRESSOR_LAYERS    = [[512, 1e-7, 0.0]] * 6   # 6 deep layers to capture non-linear tunneling currents
 
 # Bypass Thresholds (skips Stage 1 Classifier if dataset is almost purely conducting)
 MIN_BLOCKED_SAMPLES = 100
