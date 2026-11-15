@@ -1,10 +1,15 @@
 import numpy as np
 import tensorflow as tf
-from tensorflow.keras.models import Sequential, Model
+import pickle
+
+from typing import List, Tuple, Union
+from itertools import combinations
+from pathlib import Path
+
+from tensorflow.keras.models import Sequential, Model, load_model
 from tensorflow.keras.layers import Dense, Dropout, Input, Activation
 from tensorflow.keras.regularizers import l2
 from tensorflow.keras.optimizers import Adam
-from typing import List, Tuple, Union
 
 def build_mlp(input_dim: int, layer_info: List[Tuple[int, float, float]],
               lr_schedule: Union[float, tf.keras.optimizers.schedules.LearningRateSchedule], is_classifier: bool = False) -> Model:
@@ -159,3 +164,143 @@ class HurdleSurrogate:
         else:
             is_conducting = (prob_cond >= prob_threshold).astype(np.float32)
             return is_conducting * I_pred
+
+class DifferentiableNanoNode(tf.keras.layers.Layer):
+    """
+    A frozen, fully differentiable TensorFlow/Keras layer wrapping the trained 
+    Two-Stage Hurdle Surrogate Model for gradient-based In-Materio Computing.
+
+    Purpose & Physical Background
+    -----------------------------
+    Standard surrogate evaluation (`HurdleSurrogate`) uses NumPy and scikit-learn 
+    scalers, which breaks TensorFlow's automatic differentiation tape (`tf.GradientTape`).
+    By re-implementing the entire preprocessing pipeline (pairwise voltage differences, 
+    pairwise sums, voltage products, and MinMax scaling) and the inverse `arcsinh` 
+    transformation in pure TensorFlow operations, this layer allows gradients to 
+    flow seamlessly from the predicted physical output current $I_{\\mathrm{out}}$ 
+    back to the input electrode voltages $\\vec{V} = (V_0, \\dots, V_6)$.
+
+    During optimization, all internal neural network weights of the classifier and 
+    regressor remain strictly frozen (`trainable = False`). Instead, the external 
+    control voltages applied to the nanoparticle network are optimized via gradient 
+    descent to program the physical device for a target computational task.
+
+    Attributes
+    ----------
+    clf : tf.keras.Model
+        Frozen Stage-1 Coulomb blockade classifier predicting $P(\\mathrm{conducting} \\mid \\vec{V})$.
+    reg : tf.keras.Model
+        Frozen Stage-2 tunneling current regressor predicting scaled $\\mathrm{arcsinh}(I / s)$.
+    scale_factor : tf.Tensor
+        Transition current scale $s$ [aA] used in the inverse $\\sinh$ transformation.
+    diff_pairs : list of tuple[int, int]
+        Electrode index pairs $(i, j)$ for pairwise voltage differences $V_i - V_j$.
+    sum_pairs : list of tuple[int, int]
+        Electrode index pairs $(i, j)$ for pairwise voltage sums $V_i + V_j$.
+    prod_pairs : list of tuple[int, int]
+        Electrode index pairs $(i, j)$ for non-linear voltage products $V_i \\cdot V_j$.
+    x_scale, x_min : tf.Tensor
+        Extracted affine transformation constants from `MinMaxScaler` for input features.
+    y_scale, y_min : tf.Tensor
+        Extracted affine transformation constants from `MinMaxScaler` for target currents.
+    """
+
+    def __init__(self, model_dir: str | Path, **kwargs) -> None:
+        """
+        Initializes the differentiable hardware node from exported training artifacts.
+
+        Parameters
+        ----------
+        model_dir : str or Path
+            Path to the directory containing `classifier_model.keras`, 
+            `regressor_model.keras`, and `scalers.pkl`.
+        **kwargs : dict
+            Additional keyword arguments passed to `tf.keras.layers.Layer`.
+        """
+        super().__init__(**kwargs)
+        model_dir = Path(model_dir)
+
+        # Load both stages without compilation (only forward inference & input gradients needed)
+        self.clf = load_model(model_dir / "classifier_model.keras", compile=False)
+        self.reg = load_model(model_dir / "regressor_model.keras", compile=False)
+
+        # Freeze internal neural network weights so only external voltages are optimized
+        self.clf.trainable = False
+        self.reg.trainable = False
+
+        with open(model_dir / "scalers.pkl", "rb") as f:
+            meta = pickle.load(f)
+
+        self.scale_factor = tf.constant(meta["scale_factor"], dtype=tf.float32)
+
+        # Load feature engineering topology (fallback to all 21 pairs for 7 electrodes)
+        default_pairs = list(combinations(range(7), 2))
+        f_cfg = meta.get(
+            "feature_config",
+            {
+                "diff_pairs": default_pairs,
+                "sum_pairs": default_pairs,
+                "prod_pairs": default_pairs,
+            },
+        )
+        self.diff_pairs = f_cfg["diff_pairs"]
+        self.sum_pairs  = f_cfg["sum_pairs"]
+        self.prod_pairs = f_cfg["prod_pairs"]
+
+        # Extract scikit-learn MinMaxScaler parameters as TensorFlow constants:
+        # X_scaled = X_feat * x_scale + x_min
+        x_sc = meta["x_scaler"]
+        y_sc = meta["y_scaler"]
+        self.x_scale = tf.constant(x_sc.scale_, dtype=tf.float32)
+        self.x_min   = tf.constant(x_sc.min_, dtype=tf.float32)
+        self.y_scale = tf.constant(y_sc.scale_[0], dtype=tf.float32)
+        self.y_min   = tf.constant(y_sc.min_[0], dtype=tf.float32)
+
+    def call(self, V_raw: tf.Tensor) -> tf.Tensor:
+        """
+        Performs a differentiable forward pass from raw electrode voltages to output current.
+
+        Note on Smooth Gating
+        ---------------------
+        Unlike hard thresholding (which has a zero derivative everywhere and blocks 
+        gradient flow), this layer uses continuous expectation gating:
+        $I_{\\mathrm{out}} = P(\\mathrm{conducting} \\mid \\vec{V}) \\cdot I_{\\mathrm{reg}}(\\vec{V})$.
+        This ensures non-vanishing gradients even when an initial voltage configuration 
+        starts deep inside the Coulomb blockade regime.
+
+        Parameters
+        ----------
+        V_raw : tf.Tensor
+            Input tensor of shape `(batch_size, n_electrodes)` containing raw electrode 
+            potentials in Volts (typically bounded within `[-0.03, +0.03]` V).
+
+        Returns
+        -------
+        I_pA : tf.Tensor
+            Predicted physical output current tensor of shape `(batch_size, 1)` in 
+            picoamperes [pA] ($1\\,\\mathrm{pA} = 10^6\\,\\mathrm{aA}$).
+        """
+        # 1. Differentiable physics feature expansion
+        features = [V_raw]
+        for i, j in self.diff_pairs:
+            features.append(V_raw[:, i : i + 1] - V_raw[:, j : j + 1])
+        for i, j in self.sum_pairs:
+            features.append(V_raw[:, i : i + 1] + V_raw[:, j : j + 1])
+        for i, j in self.prod_pairs:
+            features.append(V_raw[:, i : i + 1] * V_raw[:, j : j + 1])
+
+        X_feat = tf.concat(features, axis=1)
+
+        # 2. Scale features to [-1, 1] using training set statistics
+        X_scaled = X_feat * self.x_scale + self.x_min
+
+        # 3. Evaluate frozen Classifier and Regressor networks
+        prob_cond = self.clf(X_scaled, training=False)
+        y_scaled  = self.reg(X_scaled, training=False)
+
+        # 4. Inverse scaling and inverse arcsinh transformation back to physical current
+        y_trans = (y_scaled - self.y_min) / self.y_scale
+        I_aA    = tf.math.sinh(y_trans) * self.scale_factor
+
+        # 5. Return smoothly gated expectation current in picoamperes [pA]
+        return (prob_cond * I_aA) / 1e6

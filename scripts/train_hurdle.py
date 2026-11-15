@@ -45,7 +45,7 @@ SCALE_FACTOR        = 1e6   # Transition scale [aA] between linear and log regim
 BLOCKADE_THRESHOLD  = 0.16  # Current cutoff [aA] (~1 e/s) defining the Coulomb blockade regime
 
 # Training Hyperparameters
-BATCH_SIZE          = 256
+BATCH_SIZE          = 1024
 EPOCHS              = 1000
 LR                  = 5e-4
 USE_ERROR_WEIGHTS   = True       # Toggle KMC inverse-error weighting for the regressor
@@ -78,13 +78,13 @@ def main() -> None:
 
     n_electrodes = data["X"].shape[1]
     all_pairs = list(combinations(range(n_electrodes), 2))
-    prod_pairs = [(5, 6), (3, 4)]
+    # prod_pairs = [(1, 2), (3, 4), (5, 6)]
 
     data["X"] = add_physics_features(
         data["X"],
         diff_pairs=all_pairs,
         sum_pairs=all_pairs,
-        prod_pairs=prod_pairs,
+        prod_pairs=all_pairs,
     )
     print(f"Expanded input features from {n_electrodes} base electrodes to {data['X'].shape[1]} features.")
 
@@ -191,7 +191,7 @@ def main() -> None:
     reg = build_mlp(X_train.shape[1], REGRESSOR_LAYERS, LR, is_classifier=False)
     reg_callbacks = [
         ReduceLROnPlateau(monitor="val_loss", factor=0.5, patience=15, min_lr=1e-6, verbose=1),
-        EarlyStopping(monitor="val_loss", patience=45, restore_best_weights=True),
+        EarlyStopping(monitor="val_loss", patience=25, restore_best_weights=True),
     ]
     history_reg = reg.fit(
         X_train[cond_train], y_r_train,
@@ -216,7 +216,7 @@ def main() -> None:
             "feature_config": {
                 "diff_pairs": all_pairs,
                 "sum_pairs": all_pairs,
-                "prod_pairs": prod_pairs,
+                "prod_pairs": all_pairs,
             },
         }, f)
 
